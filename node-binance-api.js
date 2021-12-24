@@ -5706,8 +5706,9 @@ let api = function Binance( options = {} ) {
 
                     // verify that we did not miss an event
                     if (context.finalUpdateId && context.finalUpdateId !== data.pu) {
-                        console.error("MISSED AN EVENT"); // TODO correct error handling
-                        return;
+                        let msg = 'FuturesDepthCache: Missed an event (out of sync)';
+                        if ( Binance.options.verbose ) Binance.options.log(msg);
+                        throw new Error(msg);
                     }
                     context.finalUpdateId = data.u; 
 
@@ -5717,7 +5718,6 @@ let api = function Binance( options = {} ) {
                         return;
                     }
                     updateBidsAndAsks(data);
-                    // TODO handle data
                 };
 
                 // Initialize cache with snapshot data and process messageQueue
@@ -5765,7 +5765,6 @@ let api = function Binance( options = {} ) {
                         async.mapLimit( symbols, 50, getSymbolDepthSnapshot, (err, results) => {
                             if ( err ) throw err;
                             results.forEach( initFromSnapshotData );
-                            //console.log(results);
                         } );
                     }
                 });
