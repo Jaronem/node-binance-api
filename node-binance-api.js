@@ -46,6 +46,8 @@ let api = function Binance( options = {} ) {
     Binance.futuresTicks = {};
     Binance.futuresRealtime = {};
     Binance.futuresKlineQueue = {};
+    Binance.futuresDepthCache = {};
+    Binance.futuresDepthCacheContext = {};
     Binance.deliverySubscriptions = {};
     Binance.deliveryInfo = {};
     Binance.deliveryMeta = {};
@@ -5654,6 +5656,119 @@ let api = function Binance( options = {} ) {
                     assignEndpointIdToContext( symbol, subscription.endpoint );
                 }
                 return subscription.endpoint;
+            },
+
+            // https://binance-docs.github.io/apidocs/futures/en/#how-to-manage-a-local-order-book-correctly
+            futuresDepthCache: function futuresDepthCacheFunction(symbols, callback, limit = 1000) {
+                let reconnect = () => {
+                    if ( Binance.options.reconnect ) futuresDepthCacheFunction( symbols, callback, limit );
+                };
+
+                // Initialize member variables
+                let symbolDepthInit = symbol => {
+                    if ( typeof Binance.futuresDepthCacheContext[symbol] === 'undefined' ) Binance.futuresDepthCacheContext[symbol] = {};
+                    let context = Binance.futuresDepthCacheContext[symbol];
+                    context.snapshotUpdateId = null;
+                    context.lastEventUpdateId = null;
+                    context.messageQueue = [];
+                    Binance.futuresDepthCache[symbol] = { bids: {}, asks: {} };
+                };
+
+                // updates bids and asks
+                let updateBidsAndAsks = data => {
+                    let symbol = data.s;
+                    let obj;
+                    Binance.futuresDepthCache[symbol].eventTime = data.E;
+
+                    // bids
+                    for (obj of data.b) {
+                        if (obj[1] == 0)
+                            delete Binance.futuresDepthCache[symbol].bids[obj[0]];
+                        else
+                            Binance.futuresDepthCache[symbol].bids[obj[0]] = parseFloat(obj[1]);
+                    }
+
+                    // asks
+                    for (obj of data.a) {
+                        if (obj[1] == 0)
+                            delete Binance.futuresDepthCache[symbol].asks[obj[0]];
+                        else
+                            Binance.futuresDepthCache[symbol].asks[obj[0]] = parseFloat(obj[1]);
+                    }
+
+                    if (callback) callback(symbol, Binance.futuresDepthCache[symbol], Binance.futuresDepthCacheContext[symbol]);
+                }
+
+                // Handle incoming websocket data
+                let handleDepthStreamData = data => {
+                    let symbol = data.s;
+                    let context = Binance.futuresDepthCacheContext[symbol];
+
+                    // verify that we did not miss an event
+                    if (context.finalUpdateId && context.finalUpdateId !== data.pu) {
+                        console.error("MISSED AN EVENT"); // TODO correct error handling
+                        return;
+                    }
+                    context.finalUpdateId = data.u; 
+
+                    // REST Snapshot not yet received (Step 3 incomplete)
+                    if (context.messageQueue && !context.snapshotUpdateId) {
+                        context.messageQueue.push(data)
+                        return;
+                    }
+                    updateBidsAndAsks(data);
+                    // TODO handle data
+                };
+
+                // Initialize cache with snapshot data and process messageQueue
+                let initFromSnapshotData = data => {
+                    let symbol = data.symbol;
+                    Binance.futuresDepthCache[symbol] = depthData(data); // overwrite cache
+                    let context = Binance.futuresDepthCacheContext[symbol];
+                    context.snapshotUpdateId = data.lastUpdateId;
+
+                    // drop older messages from messageQueue (Step 4 & 5) and process rest
+                    context.messageQueue = context.messageQueue.filter(msg => (msg.U >= context.snapshotUpdateId &&  msg.u >= context.snapshotUpdateId));
+                    // messageQueue may or may not be empty at this point
+                    for (let msg of context.messageQueue) {
+                        console.log("messageQueue was not empty. Size: " + context.messageQueue.length);
+                        try {
+                            updateBidsAndAsks( msg );
+                        } catch ( err ) {
+                            // Do nothing
+                        }
+                    }
+                };
+
+                // Get depth snapshot from REST API (Step 3) 
+                let getSymbolDepthSnapshot = ( symbol, cb ) => {
+                    publicRequest(fapi + 'v1/depth', { symbol: symbol, limit: limit }, (error, json) => {
+                        if (error)
+                            return cb(error, null);
+                        json.symbol = symbol;
+                        cb(null, json);
+                    } );
+                };
+
+                // map symbol to stream name
+                if (typeof symbols === 'string') symbols = [symbols];
+                if ( !isArrayUnique( symbols ) ) throw Error( 'depthCache: "symbols" cannot contain duplicate elements.' );
+                symbols.forEach(symbolDepthInit)
+                let streams = symbols.map( function ( symbol ) {
+                    return symbol.toLowerCase() + `@depth@100ms`;
+                } );
+                
+                // (always) connect to combined stream
+                let subscription = futuresSubscribe(streams, handleDepthStreamData, {
+                    reconnect: reconnect,
+                    openCallback: () => {
+                        async.mapLimit( symbols, 50, getSymbolDepthSnapshot, (err, results) => {
+                            if ( err ) throw err;
+                            results.forEach( initFromSnapshotData );
+                            //console.log(results);
+                        } );
+                    }
+                });
             },
 
             /**
