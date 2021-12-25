@@ -5731,7 +5731,6 @@ let api = function Binance( options = {} ) {
                     context.messageQueue = context.messageQueue.filter(msg => (msg.U >= context.snapshotUpdateId &&  msg.u >= context.snapshotUpdateId));
                     // messageQueue may or may not be empty at this point
                     for (let msg of context.messageQueue) {
-                        console.log("messageQueue was not empty. Size: " + context.messageQueue.length);
                         try {
                             updateBidsAndAsks( msg );
                         } catch ( err ) {
